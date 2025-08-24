@@ -3,6 +3,11 @@
 
 # yapf: disable
 import argparse
+import os
+try:
+    import torch
+except Exception:
+    torch = None
 import copy
 import dataclasses
 import functools
@@ -455,7 +460,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
         if isinstance(self.eplb_config, dict):
-            self.eplb_config = EPLBConfig(**self.eplb_config)
+            self.eplb_config = EPLBConfig.from_cli(json.dumps(
+                self.eplb_config))
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -477,6 +483,12 @@ class EngineArgs:
             title="ModelConfig",
             description=ModelConfig.__doc__,
         )
+        _env_max_cap = os.getenv("VLLM_MAX_SEQ_LEN_TO_CAPTURE")
+        if _env_max_cap:
+            try:
+                model_kwargs["max_seq_len_to_capture"]["default"] = int(_env_max_cap)
+            except Exception:
+                pass
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
         model_group.add_argument("--runner", **model_kwargs["runner"])
@@ -604,7 +616,7 @@ class EngineArgs:
             **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
-            # This choice is a special case because it's not static
+            # This choices is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
@@ -822,6 +834,28 @@ class EngineArgs:
             title="SchedulerConfig",
             description=SchedulerConfig.__doc__,
         )
+        _env_sizes = os.getenv("VLLM_CUDA_GRAPH_SIZES")
+        if _env_sizes:
+            try:
+                # 允许格式：'4096,8192' 或 '4096 8192'
+                _sizes = [int(x) for x in _env_sizes.replace(",", " ").split() if x]
+                scheduler_kwargs["cuda_graph_sizes"]["default"] = _sizes
+            except Exception:
+                pass
+
+        _env_lookahead = os.getenv("VLLM_NUM_LOOKAHEAD_SLOTS")
+        if _env_lookahead:
+            try:
+                scheduler_kwargs["num_lookahead_slots"]["default"] = int(_env_lookahead)
+            except Exception:
+                pass
+        else:
+            # 若在 ROCm（torch.version.hip 存在）且用户没显式设置，则将默认值设为 12
+            try:
+                if torch is not None and getattr(torch.version, "hip", None):
+                    scheduler_kwargs["num_lookahead_slots"]["default"] = 12
+            except Exception:
+                pass
         scheduler_group.add_argument(
             "--max-num-batched-tokens",
             **scheduler_kwargs["max_num_batched_tokens"])
@@ -1046,7 +1080,7 @@ class EngineArgs:
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we don't create one
+                # We create one since we dont create one
                 self.speculative_config = {}
                 self.speculative_config[
                     "num_speculative_tokens"] = hf_config.num_lookahead_tokens
@@ -1122,6 +1156,34 @@ class EngineArgs:
         else:
             self._set_default_args_v0(model_config)
         assert self.enable_chunked_prefill is not None
+
+        _env_max_cap = os.getenv("VLLM_MAX_SEQ_LEN_TO_CAPTURE")
+        if _env_max_cap:
+            try:
+                self.max_seq_len_to_capture = int(_env_max_cap)
+            except Exception:
+                pass
+
+        _env_sizes = os.getenv("VLLM_CUDA_GRAPH_SIZES")
+        if _env_sizes:
+            try:
+                self.cuda_graph_sizes = [int(x) for x in _env_sizes.replace(",", " ").split() if x]
+            except Exception:
+                pass
+
+        _env_lookahead = os.getenv("VLLM_NUM_LOOKAHEAD_SLOTS")
+        if _env_lookahead:
+            try:
+                self.num_lookahead_slots = int(_env_lookahead)
+            except Exception:
+                pass
+        else:
+            # ROCm 默认 12（用户未显式指定时）
+            try:
+                if torch is not None and getattr(torch.version, "hip", None):
+                    self.num_lookahead_slots = 12
+            except Exception:
+                pass
 
         if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
             assert self.enforce_eager, (
@@ -1774,7 +1836,7 @@ class AsyncEngineArgs(EngineArgs):
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         # Initialize plugin to update the parser, for example, The plugin may
-        # add a new kind of quantization method to --quantization argument or
+        # adding a new kind of quantization method to --quantization argument or
         # a new device to --device argument.
         load_general_plugins()
         if not async_args_only:
